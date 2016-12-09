@@ -218,9 +218,8 @@ class Merger():
                 logger.warning("%s and %s are incongruent;  C:%s and U:%s should sum to %s",
                         combination[0], combination[1], classified, unclassified, self.reads[combination[0]])
 
-
     @staticmethod
-    def verify_merge_order(merge_order):
+    def validate_merge_order(merge_order):
         valid_names = {"kaiju", "kraken", "clarks"}
         for name in merge_order.split(","):
             if not name in valid_names:
@@ -250,7 +249,7 @@ class Merger():
 
 def main(dbfile=":memory:", output_fn="", kaiju="", kraken="", clarks="", merge_order=""):
     merger = Merger(dbfile)
-    merger.verify_merge_order(merge_order)
+    merger.validate_merge_order(merge_order)
 
     if kaiju:
         merger.fill_table("kaiju", merger.parse_kaiju(kaiju))
