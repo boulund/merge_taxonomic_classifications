@@ -10,6 +10,7 @@ import logging
 import time
 from itertools import chain, combinations, islice
 from collections import namedtuple, defaultdict
+from functools import partial
 
 
 def grouper(n, iterable):
@@ -35,8 +36,12 @@ def parse_args():
         logger   logger instance
     """
 
-    desc = "Merge outputs from Kaiju, Kraken, and CLARK-S"
-    epilog = "Copyright (c) {author} {date}".format(author=__author__, date=__date__)
+    desc = """Merge read classifications from Kaiju, Kraken, and CLARK-S. 
+              Redefine merge order to decide classification priority; 
+              classifications are overwritten according to merge order.
+              Copyright (c) {author} {date}""".format(author=__author__, date=__date__)
+    epilog = """Using an sqlite3 database on disk consumes <150MB RAM. This is recommended.
+                The database consumes about the sum of the sizes of the input files."""
 
     parser = argparse.ArgumentParser(description=desc, epilog=epilog)
 
@@ -48,7 +53,7 @@ def parse_args():
             help="CLARK-S output file (csv).")
     parser.add_argument("-m", "--merge-order", dest="merge_order", metavar="ORDER",
             default="clarks,kraken,kaiju",
-            help="Define merge ordering, e.g. kraken,kaiju,clarks [%(default)s].")
+            help="Define merge order, e.g. kraken,kaiju,clarks [%(default)s].")
     parser.add_argument("-d", "--dbfile", dest="dbfile", metavar="DBFILE",
             default=":memory:",
             help="Write intermediary SQLite3 database to DBFILE [%(default)s].")
@@ -100,181 +105,196 @@ class Merger():
     def __init__(self, dbfile):
         self.db = sqlite3.connect(dbfile)
         
-        # Optimizations for fast inserts (see self.fill_table)
+        # Optimizations for fast inserts (see self.insert_first)
         self.db.execute("PRAGMA journal_mode = MEMORY")
         self.db.execute("PRAGMA synchronous = OFF")
         
-        tables = ["kaiju", "clarks", "kraken", "merged"]
-        drop_table = """DROP TABLE IF EXISTS {}"""
-        create_table = """CREATE TABLE {}(classified TEXT, readname TEXT PRIMARY KEY, taxid INT)"""
-        for name in tables:
-            self.db.execute(drop_table.format(name))
-            self.db.execute(create_table.format(name))
+        drop_table = """DROP TABLE IF EXISTS merged"""
+        create_table = """CREATE TABLE merged (
+                             classified TEXT, 
+                             readname TEXT PRIMARY KEY, 
+                             taxid INT,
+                             source TEXT
+                             )"""
+        self.db.execute(drop_table)
+        self.db.execute(create_table)
 
         self.reads = {}
         self.shared = defaultdict(dict)
 
+    def validate_merge_order(self, merge_order):
+        valid_names = {"kaiju": ("kaiju", self.parse_kaiju),
+                       "kraken": ("kraken", self.parse_kraken),
+                       "clarks": ("clarks", self.parse_clarks)}
+        valid_merge_order = []
+        for name in merge_order.split(","):
+            try:
+                valid_merge_order.append(valid_names[name])
+            except KeyError:
+                logger.error("Invalid name in merge order: %s", name)
+                logger.error("Requested merge order: %s", merge_order)
+                exit(2)
+        logger.info("Merge order: %s", merge_order)
+        return valid_merge_order
 
-    @staticmethod
-    def parse_kaiju(kaiju_fn):
+    def parse_kaiju(self, kaiju_fn, classified_only=False):
         with open(kaiju_fn) as f:
-            for line in f:
+            classifications = 0
+            for num, line in enumerate(f, start=1):
                 splitline = line.split()
                 classification = splitline[0]
+                if classification == "C":
+                    classifications += 1
                 readname = splitline[1]
                 taxid = int(splitline[2])
-                yield classification, readname, taxid 
+                if classified_only and classification == "C":
+                    yield classification, readname, taxid, "kaiju"
+                elif classified_only:
+                    pass
+                else:
+                    yield classification, readname, taxid, "kaiju"
+        self.reads["kaiju"] = num
+        self.reads["classified_kaiju"] = classifications
+        self.reads["unclassified_kaiju"] = num - classifications
 
-    @staticmethod
-    def parse_kraken(kraken_fn):
+    def parse_kraken(self, kraken_fn, classified_only=False):
         with open(kraken_fn) as f:
-            for line in f:
+            classifications = 0
+            for num, line in enumerate(f, start=1):
                 splitline = line.split()
                 classification = splitline[0]
+                if classification == "C":
+                    classifications += 1
                 readname = splitline[1]
                 taxid = int(splitline[2])
-                yield classification, readname, taxid 
+                if classified_only and classification == "C":
+                    yield classification, readname, taxid, "kraken"
+                elif classified_only:
+                    pass
+                else:
+                    yield classification, readname, taxid, "kraken"
+        self.reads["kraken"] = num
+        self.reads["classified_kraken"] = classifications
+        self.reads["unclassified_kraken"] = num - classifications
 
-    @staticmethod
-    def parse_clarks(clarks_fn):
+    def parse_clarks(self, clarks_fn, classified_only=False):
         with open(clarks_fn) as f:
             f.readline() # Skip header line
-            for line in f:
+            classifications = 0
+            for num, line in enumerate(f, start=1):
                 splitline = line.split(",")
-                classification = "C"
                 if splitline[0].endswith(("/1", "/2")):
                     readname = splitline[0][:-2]
                 else:
                     readname = splitline[0]
                 try:
                     taxid = int(splitline[2])
+                    classification = "C"
+                    classifications += 1
                 except ValueError:
                     taxid = 0
                     classification = "U"
                 except IndexError:
-                    print(line)
-                yield classification, readname, taxid
+                    logger.error("Could not parse CLARK-S line:")
+                    logger.error(line)
+                if classified_only and classification == "C":
+                    yield classification, readname, taxid, "clarks"
+                elif classified_only:
+                    pass
+                else:
+                    yield classification, readname, taxid, "clarks"
+        self.reads["clarks"] = num
+        self.reads["classified_clarks"] = classifications
+        self.reads["unclassified_clarks"] = num - classifications
 
-    def fill_table(self, tablename, file_parser, lines_per_chunk=100000):
+    def insert_first(self, source_name, file_parser, lines_per_chunk=100000):
         """Inserts data into SQLite3 table.
 
         Implements some wild ideas on performance optimization from:
         http://stackoverflow.com/questions/1711631/improve-insert-per-second-performance-of-sqlite
         """
-        logger.debug("Reading %s...", tablename)
+        logger.debug("Reading %s...", source_name)
         tic = time.time()
-        insert_cmd = """INSERT INTO {table} VALUES (?, ?, ?)""".format(table=tablename)
+        insert_cmd = """INSERT INTO merged VALUES (?, ?, ?, ?)"""
         for chunk in grouper(lines_per_chunk, file_parser):
             self.db.executemany(insert_cmd, chunk)
         self.db.commit()
         toc = time.time()
-        logger.debug("Reading %s completed in %2.2f seconds.", tablename, toc-tic)
+        logger.debug("Reading %s completed in %2.2f seconds.", source_name, toc-tic)
 
-    def compute_read_counts(self):
-        logger.debug("Computing read counts for all data sources...")
-        self.reads["kaiju"] = int(self.db.execute("SELECT Count(*) FROM kaiju").fetchone()[0])
-        self.reads["kraken"] = int(self.db.execute("SELECT Count(*) FROM kraken").fetchone()[0])
-        self.reads["clarks"] = int(self.db.execute("SELECT Count(*) FROM clarks").fetchone()[0])
-
-        self.reads["classified_kaiju"] = int(self.db.execute('SELECT Count(classified) FROM kaiju WHERE classified = "C"').fetchone()[0])
-        self.reads["classified_kraken"] = int(self.db.execute('SELECT Count(classified) FROM kraken WHERE classified = "C"').fetchone()[0])
-        self.reads["classified_clarks"] = int(self.db.execute('SELECT Count(classified) FROM clarks WHERE classified = "C"').fetchone()[0])
-
-        self.reads["unclassified_kaiju"] = int(self.db.execute('SELECT Count(classified) FROM kaiju WHERE classified = "U"').fetchone()[0])
-        self.reads["unclassified_kraken"] = int(self.db.execute('SELECT Count(classified) FROM kraken WHERE classified = "U"').fetchone()[0])
-        self.reads["unclassified_clarks"] = int(self.db.execute('SELECT Count(classified) FROM clarks WHERE classified = "U"').fetchone()[0])
-
-        count_unique_cmd = """SELECT Count(readname) FROM 
-                                (SELECT readname FROM kaiju
-                                 UNION
-                                 SELECT readname FROM kraken
-                                 UNION 
-                                 SELECT readname FROM clarks
-                                )
-                            """
-        self.reads["total"] = int(self.db.execute(count_unique_cmd).fetchone()[0])
-
-    def count_overlaps(self):
-        logger.debug("Computing overlaps...")
-        cmd_classified = """SELECT Count(*) FROM
-                                (SELECT readname FROM {} WHERE classified = "C"
-                                 INTERSECT
-                                 SELECT readname FROM {} WHERE classified = "C")
+    def count_sources(self):
+        logger.debug("Summarizing merged classifications...")
+        summary_cmd = """SELECT source, classified, Count(classified) FROM merged 
+                                GROUP BY source, classified
                          """
-        cmd_unclassified = """SELECT Count(*) FROM
-                                 (SELECT readname FROM {} WHERE classified = "U"
-                                  UNION
-                                  SELECT readname FROM {} WHERE classified = "U")
-                          """
-        sources = ["kaiju", "kraken", "clarks"]
-        Stuple = namedtuple("shared", "classified unclassified")
-        for combination in sorted(chain(combinations(sources, 2))):
-            classified = int(self.db.execute(cmd_classified.format(*combination)).fetchone()[0])
-            unclassified = int(self.db.execute(cmd_unclassified.format(*combination)).fetchone()[0])
-            self.shared[combination[0]][combination[1]] = Stuple(classified, unclassified)
-            self.shared[combination[1]][combination[0]] = Stuple(classified, unclassified)
+        for row in self.db.execute(summary_cmd).fetchall():
+            yield row
+        logger.debug("Summarizing merged classifications completed.")
 
-            if classified + unclassified != self.reads[combination[0]]:
-                logger.warning("%s and %s are incongruent;  C:%s and U:%s should sum to %s",
-                        combination[0], combination[1], classified, unclassified, self.reads[combination[0]])
-
-    @staticmethod
-    def validate_merge_order(merge_order):
-        valid_names = {"kaiju", "kraken", "clarks"}
-        for name in merge_order.split(","):
-            if not name in valid_names:
-                logger.error("Invalid name in merge order: %s", name)
-                logger.error("Requested merge order: %s", merge_order)
-                exit(2)
-        logger.info("Merge order: %s", merge_order)
-
-    def merge_tables(self, merge_order):
-        logger.info("Merging data sources according to merge order: %s", merge_order)
-        merge_order = merge_order.split(",")
-        insert_first = """INSERT INTO merged SELECT * FROM {table}"""
-        insert_or_replace = """INSERT OR REPLACE INTO merged 
-                               SELECT * FROM {table} WHERE {table}.classified = "C"
-                            """
-        self.db.execute(insert_first.format(table=merge_order[0]))
-        self.db.execute(insert_or_replace.format(table=merge_order[1]))
-        self.db.execute(insert_or_replace.format(table=merge_order[2]))
-
-        logger.debug("%s reads in merged table.", 
-                self.db.execute("SELECT Count(readname) FROM merged;").fetchone()[0])
+    def insert_replace(self, source_name, file_parser, lines_per_chunk=100000):
+        logger.debug("Reading %s...", source_name)
+        tic = time.time()
+        insert_or_replace = """INSERT OR REPLACE INTO merged VALUES (?, ?, ?, ?)"""
+        for chunk in grouper(lines_per_chunk, file_parser):
+            self.db.executemany(insert_or_replace, chunk)
+        self.db.commit()
+        toc = time.time()
+        logger.debug("Reading %s completed in %2.2f seconds.", source_name, toc-tic)
 
     def get_merged(self):
-        for row in self.db.execute("SELECT * FROM merged ORDER BY readname"):
+        for row in self.db.execute("SELECT classified, readname, taxid FROM merged ORDER BY readname"):
             yield map(str, row)
 
 
 def main(dbfile=":memory:", output_fn="", kaiju="", kraken="", clarks="", merge_order=""):
     merger = Merger(dbfile)
-    merger.validate_merge_order(merge_order)
+    source_files = {"kaiju": kaiju,
+                    "kraken": kraken,
+                    "clarks": clarks}
+    valid_merge_order = merger.validate_merge_order(merge_order)
 
-    if kaiju:
-        merger.fill_table("kaiju", merger.parse_kaiju(kaiju))
-    if kraken:
-        merger.fill_table("kraken", merger.parse_kraken(kraken))
-    if clarks:
-        merger.fill_table("clarks", merger.parse_clarks(clarks))
+    merger.insert_first(source_name=valid_merge_order[0][0],
+                        file_parser=valid_merge_order[0][1](source_files[valid_merge_order[0][0]]))
+    for source_name, parser in valid_merge_order[1:]:
+        merger.insert_replace(source_name=source_name, 
+                              file_parser=parser(source_files[source_name], 
+                                                 classified_only=True))
 
-    merger.compute_read_counts()
-    logger.info("Unique reads:")
-    logger.info("  Kaiju:    %s", merger.reads["kaiju"])
-    logger.info("  Kraken:   %s", merger.reads["kraken"])
-    logger.info("  CLARK-S:  %s", merger.reads["clarks"])
-    logger.info("  Combined: %s", merger.reads["total"])
+    logger.info(" Source summary ".center(50, "="))
+    logger.info("Number of reads:")
+    for source_name, _ in valid_merge_order:
+        logger.info("  %7s:  %s", source_name, merger.reads[source_name])
+
     logger.info("Classified reads:")
-    logger.info("  Kaiju:    %s", merger.reads["classified_kaiju"])
-    logger.info("  Kraken:   %s", merger.reads["classified_kraken"])
-    logger.info("  CLARK-S:  %s", merger.reads["classified_clarks"])
-    logger.info("Unclassified reads:")
-    logger.info("  Kaiju:    %s", merger.reads["unclassified_kaiju"])
-    logger.info("  Kraken:   %s", merger.reads["unclassified_kraken"])
-    logger.info("  CLARK-S:  %s", merger.reads["unclassified_clarks"])
+    for source_name, _ in valid_merge_order:
+        logger.info("  %7s:    %9i (%2.2f%%)", 
+                source_name, 
+                merger.reads["classified_"+source_name], 
+                100 * merger.reads["classified_"+source_name] / merger.reads[source_name])
 
-    merger.merge_tables(merge_order)
-    merger.count_overlaps()
+    logger.info("Unclassified reads:")
+    for source_name, _ in valid_merge_order:
+        logger.info("  %7s:    %9i (%2.2f%%)", 
+                source_name, 
+                merger.reads["unclassified_"+source_name],
+                100 * (merger.reads["unclassified_"+source_name]) / merger.reads[source_name])
+
+    logger.info(" Merged classifications summary ".center(50, "="))
+    counted_sources = list(merger.count_sources())
+    classified_total = sum(c[2] for c in counted_sources if c[1] == "C")
+    unclassified_total = sum(c[2] for c in counted_sources if c[1] == "U")
+    if classified_total:
+        logger.info(" Classified reads:")
+    for source, count in ((row[0], row[2]) for row in counted_sources if row[1] == "C"):
+        logger.info("  %7s: %10i", source, count)
+    if unclassified_total:
+        logger.info(" Unclassified reads:")
+    for source, count in ((row[0], row[2]) for row in counted_sources if row[1] == "U"):
+        logger.info("  %7s: %10i", source, count)
+    logger.info(" Total classified:   %10i (%2.2f%%)", classified_total, 
+            100 * classified_total/(classified_total+unclassified_total))
+    logger.info(" Total unclassified: %10i (%2.2f%%)", unclassified_total, 
+            100 * unclassified_total/(classified_total+unclassified_total))
 
     if output_fn:
         output = open(output_fn, 'w')
