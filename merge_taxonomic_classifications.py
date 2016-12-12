@@ -10,7 +10,6 @@ import logging
 import time
 from itertools import chain, combinations, islice
 from collections import namedtuple, defaultdict
-from functools import partial
 
 
 def grouper(n, iterable):
