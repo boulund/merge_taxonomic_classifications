@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 __author__ = "Fredrik Boulund"
 __date__ = "2016"
-__doc__ = """Merge taxonomic read assignments produced by Kaiju, Kraken, and CLARK-S"""
+__doc__ = """Merge taxonomic read assignments produced by Kaiju, Kraken, and CLARK-S."""
+__version__ = "1.0"
 
 from sys import argv, exit, stdout
 import argparse
@@ -36,11 +37,14 @@ def parse_args():
     """
 
     desc = """Merge read classifications from Kaiju, Kraken, and CLARK-S. 
-              Redefine merge order to decide classification priority; 
-              classifications are overwritten according to merge order.
-              Copyright (c) {author} {date}""".format(author=__author__, date=__date__)
-    epilog = """Using an sqlite3 database on disk consumes <150MB RAM. This is recommended.
-                The database consumes about the sum of the sizes of the input files."""
+              Copyright (c) {author} {date}. 
+              Version {version}.""".format(author=__author__, 
+                                           date=__date__,
+                                           version=__version__)
+    epilog = """Redefine merge order to decide classification priority; 
+    classifications are overwritten according to merge order.
+    Using an sqlite3 database on disk consumes <150MB RAM. This is recommended.
+    The database consumes about the sum of the sizes of the input files."""
 
     parser = argparse.ArgumentParser(description=desc, epilog=epilog)
 
@@ -67,12 +71,19 @@ def parse_args():
     parser.add_argument("--logfile", metavar="LOGFILE",
             default="",
             help="Log to LOGFILE instead of STDOUT.")
+    parser.add_argument("--version", action="store_true",
+            default=False,
+            help="Print version.")
 
     if len(argv) < 2:
         parser.print_help()
         exit(1)
 
     options = parser.parse_args()
+
+    if options.version:
+        print(__doc__+" Version {}".format(__version__))
+        exit()
 
     logger = logging.getLogger(__name__)
     if options.loglevel == "DEBUG":
