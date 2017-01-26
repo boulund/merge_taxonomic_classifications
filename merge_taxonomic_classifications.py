@@ -150,6 +150,7 @@ class Merger():
     def parse_kaiju(self, kaiju_fn, classified_only=False):
         with open(kaiju_fn) as f:
             classifications = 0
+            num = 0
             for num, line in enumerate(f, start=1):
                 splitline = line.split()
                 classification = splitline[0]
@@ -170,6 +171,7 @@ class Merger():
     def parse_kraken(self, kraken_fn, classified_only=False):
         with open(kraken_fn) as f:
             classifications = 0
+            num = 0
             for num, line in enumerate(f, start=1):
                 splitline = line.split()
                 classification = splitline[0]
@@ -191,6 +193,7 @@ class Merger():
         with open(clarks_fn) as f:
             f.readline() # Skip header line
             classifications = 0
+            num = 0
             for num, line in enumerate(f, start=1):
                 splitline = line.split(",")
                 if splitline[0].endswith(("/1", "/2")):
