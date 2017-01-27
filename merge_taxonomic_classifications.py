@@ -167,6 +167,8 @@ class Merger():
         self.reads["kaiju"] = num
         self.reads["classified_kaiju"] = classifications
         self.reads["unclassified_kaiju"] = num - classifications
+        if num == 0:
+            logger.warning("Parsed no reads from Kaiju: %s", kaiju_fn)
 
     def parse_kraken(self, kraken_fn, classified_only=False):
         with open(kraken_fn) as f:
@@ -188,6 +190,8 @@ class Merger():
         self.reads["kraken"] = num
         self.reads["classified_kraken"] = classifications
         self.reads["unclassified_kraken"] = num - classifications
+        if num == 0:
+            logger.warning("Parsed no reads from Kraken: %s", kraken_fn)
 
     def parse_clarks(self, clarks_fn, classified_only=False):
         with open(clarks_fn) as f:
@@ -219,6 +223,8 @@ class Merger():
         self.reads["clarks"] = num
         self.reads["classified_clarks"] = classifications
         self.reads["unclassified_clarks"] = num - classifications
+        if num == 0:
+            logger.warning("Parsed no reads from CLARK-S: %s", clarks_fn)
 
     def insert_first(self, source_name, file_parser, lines_per_chunk=100000):
         """Inserts data into SQLite3 table.
@@ -276,21 +282,29 @@ def main(dbfile=":memory:", output_fn="", kaiju="", kraken="", clarks="", merge_
     logger.info(" Source summary ".center(50, "="))
     logger.info("Number of reads:")
     for source_name, _ in valid_merge_order:
-        logger.info("  %7s:  %s", source_name, merger.reads[source_name])
+        logger.info("  %7s:    %9i", source_name, merger.reads[source_name])
 
     logger.info("Classified reads:")
     for source_name, _ in valid_merge_order:
+        if merger.reads[source_name] == 0:
+            percentage = 0.00
+        else:
+            percentage = 100 * merger.reads["classified_"+source_name] / merger.reads[source_name]
         logger.info("  %7s:    %9i (%2.2f%%)", 
                 source_name, 
                 merger.reads["classified_"+source_name], 
-                100 * merger.reads["classified_"+source_name] / merger.reads[source_name])
+                percentage)
 
     logger.info("Unclassified reads:")
     for source_name, _ in valid_merge_order:
+        if merger.reads[source_name] == 0:
+            percentage = 0.00
+        else:
+            percentage = 100 * merger.reads["unclassified_"+source_name] / merger.reads[source_name]
         logger.info("  %7s:    %9i (%2.2f%%)", 
                 source_name, 
                 merger.reads["unclassified_"+source_name],
-                100 * (merger.reads["unclassified_"+source_name]) / merger.reads[source_name])
+                percentage)
 
     logger.info(" Merged classifications summary ".center(50, "="))
     counted_sources = list(merger.count_sources())
@@ -298,16 +312,16 @@ def main(dbfile=":memory:", output_fn="", kaiju="", kraken="", clarks="", merge_
     unclassified_total = sum(c[2] for c in counted_sources if c[1] == "U")
     if classified_total:
         logger.info(" Classified reads:")
-    for source, count in ((row[0], row[2]) for row in counted_sources if row[1] == "C"):
-        logger.info("  %7s: %10i", source, count)
+        for source, count in ((row[0], row[2]) for row in counted_sources if row[1] == "C"):
+            logger.info("  %7s: %10i", source, count)
+        logger.info(" Total classified:   %10i (%2.2f%%)", classified_total, 
+                100 * classified_total/(classified_total+unclassified_total))
     if unclassified_total:
         logger.info(" Unclassified reads:")
-    for source, count in ((row[0], row[2]) for row in counted_sources if row[1] == "U"):
-        logger.info("  %7s: %10i", source, count)
-    logger.info(" Total classified:   %10i (%2.2f%%)", classified_total, 
-            100 * classified_total/(classified_total+unclassified_total))
-    logger.info(" Total unclassified: %10i (%2.2f%%)", unclassified_total, 
-            100 * unclassified_total/(classified_total+unclassified_total))
+        for source, count in ((row[0], row[2]) for row in counted_sources if row[1] == "U"):
+            logger.info("  %7s: %10i", source, count)
+        logger.info(" Total unclassified: %10i (%2.2f%%)", unclassified_total, 
+                100 * unclassified_total/(classified_total+unclassified_total))
 
     if output_fn:
         output = open(output_fn, 'w')
