@@ -5,6 +5,7 @@ __doc__ = """Merge taxonomic read assignments produced by Kaiju, Kraken, and CLA
 __version__ = "1.0"
 
 from sys import argv, exit, stdout
+from os import path
 import argparse
 import sqlite3
 import logging
@@ -148,6 +149,10 @@ class Merger():
         return valid_merge_order
 
     def parse_kaiju(self, kaiju_fn, classified_only=False):
+        if kaiju_fn is None or not path.isfile(kaiju_fn):
+            logging.error("Cannot find Kaiju file: %s", kaiju_fn)
+            logging.error("Remove 'kaiju' from merge order if not merging with Kaiju results.")
+            exit(2)
         with open(kaiju_fn) as f:
             classifications = 0
             num = 0
@@ -171,6 +176,10 @@ class Merger():
             logger.warning("Parsed no reads from Kaiju: %s", kaiju_fn)
 
     def parse_kraken(self, kraken_fn, classified_only=False):
+        if kraken_fn is None or not path.isfile(kraken_fn):
+            logging.error("Cannot find Kraken file: %s", kraken_fn)
+            logging.error("Remove 'kraken' from merge order if not merging with Kraken results.")
+            exit(2)
         with open(kraken_fn) as f:
             classifications = 0
             num = 0
@@ -194,6 +203,10 @@ class Merger():
             logger.warning("Parsed no reads from Kraken: %s", kraken_fn)
 
     def parse_clarks(self, clarks_fn, classified_only=False):
+        if clarks_fn is None or not path.isfile(clarks_fn):
+            logging.error("Cannot find CLARK-S file: %s", clarks_fn)
+            logging.error("Remove 'clarks' from merge order if not merging with CLARK-S results.")
+            exit(2)
         with open(clarks_fn) as f:
             f.readline() # Skip header line
             classifications = 0
